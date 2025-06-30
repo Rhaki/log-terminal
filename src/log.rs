@@ -1,5 +1,8 @@
 use {
-    crate::{draw::draw_thread, inputs::inputs_thread},
+    crate::{
+        draw::{DrawEvent, draw_thread},
+        inputs::inputs_thread,
+    },
     std::{
         collections::VecDeque,
         io::{self, Write},
@@ -155,15 +158,15 @@ where
         let events: Arc<Mutex<VecDeque<Option<String>>>> = Default::default();
 
         let _events = events.clone();
+        let _tx = tx.clone();
 
-        thread::spawn(|| inputs_thread());
-
-        thread::spawn(move || draw_thread(events, rx));
+        thread::spawn(move || inputs_thread(_tx));
+        thread::spawn(move || draw_thread(_events, rx));
 
         (
             Self {
                 max_level: tracing::Level::DEBUG,
-                events: _events,
+                events,
                 split_by,
             },
             ChannelWriter { tx },
@@ -233,7 +236,7 @@ where
 }
 
 pub struct ChannelWriter {
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::Sender<DrawEvent>,
 }
 
 impl<'a> MakeWriter<'a> for ChannelWriter {
@@ -246,7 +249,7 @@ impl<'a> MakeWriter<'a> for ChannelWriter {
 
 impl<'a> Write for &'a ChannelWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.tx.send(buf.to_vec()).unwrap();
+        self.tx.send(DrawEvent::Trace(buf.to_vec())).unwrap();
         Ok(buf.len())
     }
 
