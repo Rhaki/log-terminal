@@ -2,7 +2,7 @@ use log_terminal::{SplitBy, SplitFilter, TerminalLog};
 
 #[test]
 fn name() {
-    TerminalLog::new(SplitBy::TargetPrefix(SplitFilter::None))
+    TerminalLog::new(SplitBy::TargetPrefix(SplitFilter::whitelist(["pippo"])))
         // .customize_fmt_layer(|layer| layer.with_target(false).without_time())
         .with_max_level(tracing::Level::INFO)
         .finish();

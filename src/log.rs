@@ -3,6 +3,7 @@ use {
     std::{
         collections::VecDeque,
         io::{self, Write},
+        marker::PhantomData,
         sync::{Arc, Mutex, Once, mpsc},
         thread,
     },
@@ -21,40 +22,47 @@ static TRACING: Once = Once::new();
 
 const NAME_NOT_FOUND: &str = "undefined";
 
-pub struct TerminalLog<N, E> {
-    rl: RedirectLayer,
-    fmt_layer: FmtLayer<Layered<RedirectLayer, Registry>, N, E, ChannelWriter>,
+pub struct TerminalLog<N, E, V, S> {
+    rl: RedirectLayer<V, S>,
+    fmt_layer: FmtLayer<Layered<RedirectLayer<V, S>, Registry>, N, E, ChannelWriter>,
 }
 
-impl TerminalLog<DefaultFields, Format> {
-    pub fn new(split_by: SplitBy) -> TerminalLog<DefaultFields, Format> {
+impl<V, S> TerminalLog<DefaultFields, Format, V, S>
+where
+    S: PartialEq<String>,
+    V: AsRef<[S]>,
+{
+    pub fn new(split_by: SplitBy<V, S>) -> TerminalLog<DefaultFields, Format, V, S> {
         let (rl, cw) = RedirectLayer::new(split_by);
         let fmt_layer = FmtLayer::new().with_writer(cw);
         TerminalLog { rl, fmt_layer }
     }
 }
 
-impl<N, E> TerminalLog<N, E>
+impl<N, E, V, S> TerminalLog<N, E, V, S>
 where
     N: Send + Sync + 'static,
     E: Send + Sync + 'static,
-    FmtLayer<Layered<RedirectLayer, Registry>, N, E, ChannelWriter>:
-        Layer<Layered<RedirectLayer, Registry>>,
+    S: PartialEq<String>,
+    V: AsRef<[S]>,
+    RedirectLayer<V, S>: Send + Sync + 'static,
+    FmtLayer<Layered<RedirectLayer<V, S>, Registry>, N, E, ChannelWriter>:
+        Layer<Layered<RedirectLayer<V, S>, Registry>>,
 {
     pub fn customize_fmt_layer<N1, E1>(
         self,
         closure: impl FnOnce(
-            FmtLayer<Layered<RedirectLayer, Registry>, N, E, ChannelWriter>,
+            FmtLayer<Layered<RedirectLayer<V, S>, Registry>, N, E, ChannelWriter>,
         )
-            -> FmtLayer<Layered<RedirectLayer, Registry>, N1, E1, ChannelWriter>,
-    ) -> TerminalLog<N1, E1> {
+            -> FmtLayer<Layered<RedirectLayer<V, S>, Registry>, N1, E1, ChannelWriter>,
+    ) -> TerminalLog<N1, E1, V, S> {
         TerminalLog {
             rl: self.rl,
             fmt_layer: closure(self.fmt_layer),
         }
     }
 
-    pub fn with_max_level(mut self, level: tracing::Level) -> TerminalLog<N, E> {
+    pub fn with_max_level(mut self, level: tracing::Level) -> TerminalLog<N, E, V, S> {
         self.rl.max_level = level;
         self
     }
@@ -71,30 +79,55 @@ where
     }
 }
 
-pub enum SplitBy {
-    Target(SplitFilter),
-    TargetPrefix(SplitFilter),
-    Name(SplitFilter),
+pub enum SplitBy<V, S> {
+    Target(SplitFilter<V, S>),
+    TargetPrefix(SplitFilter<V, S>),
+    Name(SplitFilter<V, S>),
 }
 
-pub enum SplitFilter {
-    WhiteList(&'static [&'static str]),
-    BlackList(&'static [&'static str]),
+#[non_exhaustive]
+pub enum SplitFilter<V, S> {
+    WhiteList(V, PhantomData<S>),
+    BlackList(V, PhantomData<S>),
     None,
 }
 
-impl SplitFilter {
+impl<V, S> SplitFilter<V, S>
+where
+    S: PartialEq<String>,
+    V: AsRef<[S]>,
+{
+    pub fn whitelist(items: V) -> Self {
+        Self::WhiteList(items, PhantomData)
+    }
+
+    pub fn blacklist(items: V) -> Self {
+        Self::BlackList(items, PhantomData)
+    }
+}
+
+impl SplitFilter<Vec<String>, String> {
+    pub fn none() -> Self {
+        Self::None
+    }
+}
+
+impl<V, S> SplitFilter<V, S>
+where
+    S: PartialEq<String>,
+    V: AsRef<[S]>,
+{
     pub fn filter<'a>(&self, target: String) -> Option<String> {
         match self {
-            SplitFilter::WhiteList(items) => {
-                if items.contains(&target.as_str()) {
+            SplitFilter::WhiteList(items, _) => {
+                if items.as_ref().iter().any(|item| item == &target) {
                     Some(target)
                 } else {
                     None
                 }
             },
-            SplitFilter::BlackList(items) => {
-                if items.contains(&target.as_str()) {
+            SplitFilter::BlackList(items, _) => {
+                if items.as_ref().iter().any(|item| item == &target) {
                     None
                 } else {
                     Some(target)
@@ -105,14 +138,18 @@ impl SplitFilter {
     }
 }
 
-pub struct RedirectLayer {
+pub struct RedirectLayer<V, S> {
     max_level: tracing::Level,
-    split_by: SplitBy,
+    split_by: SplitBy<V, S>,
     events: Arc<Mutex<VecDeque<Option<String>>>>,
 }
 
-impl RedirectLayer {
-    pub fn new(split_by: SplitBy) -> (Self, ChannelWriter) {
+impl<V, S> RedirectLayer<V, S>
+where
+    S: PartialEq<String>,
+    V: AsRef<[S]>,
+{
+    pub fn new(split_by: SplitBy<V, S>) -> (Self, ChannelWriter) {
         let (tx, rx) = mpsc::channel();
 
         let events: Arc<Mutex<VecDeque<Option<String>>>> = Default::default();
@@ -133,13 +170,13 @@ impl RedirectLayer {
         )
     }
 
-    fn filter<S>(
+    fn filter<Sub>(
         &self,
         event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
+        _ctx: tracing_subscriber::layer::Context<'_, Sub>,
     ) -> Option<String>
     where
-        S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+        Sub: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
     {
         match &self.split_by {
             SplitBy::Target(filter) => filter.filter(event.metadata().target().to_string()),
@@ -169,14 +206,17 @@ impl RedirectLayer {
     }
 }
 
-impl<S> Layer<S> for RedirectLayer
+impl<S, V, Sub> Layer<Sub> for RedirectLayer<V, S>
 where
-    S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    Self: 'static,
+    S: PartialEq<String>,
+    V: AsRef<[S]>,
+    Sub: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
     fn enabled(
         &self,
         metadata: &tracing::Metadata<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
+        _ctx: tracing_subscriber::layer::Context<'_, Sub>,
     ) -> bool {
         metadata.level() <= &self.max_level
     }
@@ -184,7 +224,7 @@ where
     fn on_event(
         &self,
         event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
+        _ctx: tracing_subscriber::layer::Context<'_, Sub>,
     ) {
         let name = self.filter(event, _ctx);
 
