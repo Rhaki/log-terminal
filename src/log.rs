@@ -1,6 +1,6 @@
 use {
     crate::{
-        draw::{DrawEvent, draw_thread},
+        draw::{DrawEvent, MAX_LINES, draw_thread},
         inputs::inputs_thread,
     },
     std::{
@@ -67,6 +67,11 @@ where
 
     pub fn with_max_level(mut self, level: tracing::Level) -> TerminalLog<N, E, V, S> {
         self.rl.max_level = level;
+        self
+    }
+
+    pub fn with_max_lines(self, lines: usize) -> TerminalLog<N, E, V, S> {
+        *MAX_LINES.lock().unwrap() = lines;
         self
     }
 

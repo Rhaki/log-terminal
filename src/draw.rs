@@ -11,10 +11,12 @@ use {
     std::{
         cmp::min,
         collections::{HashMap, VecDeque},
-        sync::{Arc, Mutex, mpsc},
+        sync::{Arc, LazyLock, Mutex, mpsc},
     },
 };
+pub(crate) static MAX_LINES: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(2_000));
 
+#[derive(Clone)]
 pub(crate) struct ScrollEvent {
     pub scroll: i32,
     pub column: u16,
@@ -75,18 +77,18 @@ pub(crate) fn draw_thread(
     rx: mpsc::Receiver<DrawEvent>,
 ) {
     let mut terminal = ratatui::init();
-    let mut data: Vec<(String, Vec<Text<'static>>)> = Vec::new();
+    let mut data: Vec<(String, VecDeque<Text<'static>>)> = Vec::new();
     let mut to_scroll: Option<ScrollEvent> = None;
     let mut scroll_offsets: HashMap<usize, Offset> = HashMap::new();
 
     loop {
         if let Ok(trace) = rx.recv() {
-            let action = match trace {
+            let action = match &trace {
                 DrawEvent::Mouse(mouse) => {
-                    to_scroll = Some(mouse);
+                    to_scroll = Some(mouse.clone());
                     Action::Draw
                 },
-                DrawEvent::Trace(trace) => on_trace_event(trace, &trace_names, &mut data),
+                DrawEvent::Trace(trace) => on_trace_event(trace.clone(), &trace_names, &mut data),
             };
 
             if let Action::Continue = action {
@@ -102,8 +104,8 @@ pub(crate) fn draw_thread(
                         .constraints(vec![Constraint::Ratio(1, counter as u32); counter])
                         .split(frame.area());
 
-                    for (index, (name, trace)) in data.iter().enumerate() {
-                        let trace_len = trace.len() as usize;
+                    for (index, (name, traces)) in data.iter().enumerate() {
+                        let trace_len = traces.len() as usize;
 
                         // Handle the scroll event and calculate the offset
                         let offset = {
@@ -124,7 +126,16 @@ pub(crate) fn draw_thread(
                                 }
                             }
 
-                            if let Some(offset) = scroll_offsets.get(&index) {
+                            if let Some(offset) = scroll_offsets.get_mut(&index) {
+                                // if we are scrolling and the event want to add a line at max len, we need to
+                                // scroll up
+                                if let DrawEvent::Trace(..) = &trace {
+                                    if traces.len() == *MAX_LINES.lock().unwrap() && offset.enabled
+                                    {
+                                        offset.scroll_up(1, trace_len);
+                                    }
+                                }
+
                                 offset.offset(trace_len)
                             } else {
                                 trace_len
@@ -145,7 +156,7 @@ pub(crate) fn draw_thread(
                                 );
                             }
 
-                            let list = List::new(trace.clone()).block(block);
+                            let list = List::new(traces.clone()).block(block);
 
                             let mut state = ListState::default().with_selected(Some(offset));
 
@@ -174,7 +185,7 @@ pub(crate) fn draw_thread(
 fn on_trace_event(
     trace: Vec<u8>,
     trace_names: &Arc<Mutex<VecDeque<Option<String>>>>,
-    data: &mut Vec<(String, Vec<Text<'static>>)>,
+    data: &mut Vec<(String, VecDeque<Text<'static>>)>,
 ) -> Action {
     let name = trace_names
         .lock()
@@ -201,11 +212,16 @@ fn on_trace_event(
     Action::Draw
 }
 
-fn get_or_insert(data: &mut Vec<(String, Vec<Text<'static>>)>, trace: Text<'static>, name: String) {
+fn get_or_insert<T>(data: &mut Vec<(String, VecDeque<T>)>, trace: T, name: String) {
     if let Some(pos) = data.iter().position(|(k, _)| k == &name) {
-        data[pos].1.push(trace);
+        data[pos].1.push_back(trace);
+
+        if data[pos].1.len() > *MAX_LINES.lock().unwrap() {
+            data[pos].1.pop_front();
+        }
+
         return;
     }
 
-    data.push((name, vec![trace]));
+    data.push((name, VecDeque::from([trace])));
 }

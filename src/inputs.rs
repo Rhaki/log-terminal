@@ -29,13 +29,19 @@ pub fn inputs_thread(tx: mpsc::Sender<DrawEvent>) {
             ratatui::restore();
             std::process::exit(0);
         } else if let Event::Mouse(mouse) = event {
-            let scroll = match mouse.kind {
+            let mut scroll = match mouse.kind {
                 MouseEventKind::ScrollDown => -1,
                 MouseEventKind::ScrollUp => 1,
                 _ => {
                     continue;
                 },
             };
+
+            match mouse.modifiers {
+                KeyModifiers::SHIFT => scroll *= 10,
+                KeyModifiers::ALT => scroll *= i32::MAX,
+                _ => {},
+            }
 
             tx.send(DrawEvent::Mouse(ScrollEvent {
                 scroll,
