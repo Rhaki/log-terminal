@@ -1,64 +1,59 @@
 use {
-    crate::draw::{DrawEvent, ScrollEvent},
-    crossterm::{
-        event::{
-            EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent,
-            KeyModifiers, MouseEventKind,
-        },
-        execute,
-    },
-    std::sync::{LazyLock, mpsc},
+    crate::draw::{ChangeTabDirection, DrawEvent},
+    crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers},
+    std::sync::mpsc,
 };
 
-static EXIT_KEY: LazyLock<Event> =
-    LazyLock::new(|| KeyCode::Char('c').into_event(KeyModifiers::CONTROL));
+const EXIT: KeyEvent = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+
+const TAB_LEFT: KeyEvent = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+
+const TAB_RIGHT: KeyEvent = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+
+const SCROLL_UP: KeyEvent = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+
+const SCROLL_10_UP: KeyEvent = KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT);
+
+const SCROLL_ALL_UP: KeyEvent = KeyEvent::new(KeyCode::Up, KeyModifiers::ALT);
+
+const SCROLL_DOWN: KeyEvent = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+
+const SCROLL_10_DOWN: KeyEvent = KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT);
+
+const SCROLL_ALL_DOWN: KeyEvent = KeyEvent::new(KeyCode::Down, KeyModifiers::ALT);
 
 pub fn inputs_thread(tx: mpsc::Sender<DrawEvent>) {
-    execute!(
-        std::io::stdout(),
-        EnableBracketedPaste,
-        EnableFocusChange,
-        EnableMouseCapture
-    )
-    .unwrap();
-
     loop {
         let event = crossterm::event::read().expect("Failed to read event");
 
-        if event == *EXIT_KEY {
-            ratatui::restore();
-            std::process::exit(0);
-        } else if let Event::Mouse(mouse) = event {
-            let mut scroll = match mouse.kind {
-                MouseEventKind::ScrollDown => -1,
-                MouseEventKind::ScrollUp => 1,
-                _ => {
-                    continue;
-                },
-            };
+        match event {
+            Event::Key(key_event) => {
+                if key_event == EXIT {
+                    ratatui::restore();
+                    std::process::exit(0);
+                } else if key_event == SCROLL_UP {
+                    tx.send(DrawEvent::Scroll(1)).unwrap();
+                } else if key_event == SCROLL_DOWN {
+                    tx.send(DrawEvent::Scroll(-1)).unwrap();
+                } else if key_event == TAB_LEFT {
+                    tx.send(DrawEvent::ChangeTab(ChangeTabDirection::Left))
+                        .unwrap();
+                } else if key_event == TAB_RIGHT {
+                    tx.send(DrawEvent::ChangeTab(ChangeTabDirection::Right))
+                        .unwrap();
+                } else if key_event == SCROLL_10_UP {
+                    tx.send(DrawEvent::Scroll(10)).unwrap();
+                } else if key_event == SCROLL_10_DOWN {
+                    tx.send(DrawEvent::Scroll(-10)).unwrap();
+                } else if key_event == SCROLL_ALL_UP {
+                    tx.send(DrawEvent::Scroll(i32::MAX)).unwrap();
+                } else if key_event == SCROLL_ALL_DOWN {
+                    tx.send(DrawEvent::Scroll(-i32::MAX)).unwrap();
+                }
+            },
 
-            match mouse.modifiers {
-                KeyModifiers::SHIFT => scroll *= 10,
-                KeyModifiers::ALT => scroll *= i32::MAX,
-                _ => {},
-            }
-
-            tx.send(DrawEvent::Mouse(ScrollEvent {
-                scroll,
-                column: mouse.column,
-                row: mouse.row,
-            }))
-            .unwrap();
+            Event::Resize(_, _) => tx.send(DrawEvent::Resize).unwrap(),
+            _ => {},
         }
-    }
-}
-
-trait KeyCodeExt: Sized {
-    fn into_event(self, modifier: KeyModifiers) -> Event;
-}
-
-impl KeyCodeExt for KeyCode {
-    fn into_event(self, modifier: KeyModifiers) -> Event {
-        Event::Key(KeyEvent::new(self, modifier))
     }
 }
