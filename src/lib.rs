@@ -1,5 +1,6 @@
 mod draw;
 mod log;
 mod inputs;
+mod index;
 
-pub use log::{TerminalLog, SplitBy, SplitFilter};
+pub use log::{LogTerminal, SplitBy, SplitFilter};

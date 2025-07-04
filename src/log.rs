@@ -25,24 +25,24 @@ static TRACING: Once = Once::new();
 
 const NAME_NOT_FOUND: &str = "undefined";
 
-pub struct TerminalLog<N, E, V, S> {
+pub struct LogTerminal<N, E, V, S> {
     rl: RedirectLayer<V, S>,
     fmt_layer: FmtLayer<Layered<RedirectLayer<V, S>, Registry>, N, E, ChannelWriter>,
 }
 
-impl<V, S> TerminalLog<DefaultFields, Format, V, S>
+impl<V, S> LogTerminal<DefaultFields, Format, V, S>
 where
     S: PartialEq<String>,
     V: AsRef<[S]>,
 {
-    pub fn new(split_by: SplitBy<V, S>) -> TerminalLog<DefaultFields, Format, V, S> {
+    pub fn new(split_by: SplitBy<V, S>) -> LogTerminal<DefaultFields, Format, V, S> {
         let (rl, cw) = RedirectLayer::new(split_by);
         let fmt_layer = FmtLayer::new().with_writer(cw);
-        TerminalLog { rl, fmt_layer }
+        LogTerminal { rl, fmt_layer }
     }
 }
 
-impl<N, E, V, S> TerminalLog<N, E, V, S>
+impl<N, E, V, S> LogTerminal<N, E, V, S>
 where
     N: Send + Sync + 'static,
     E: Send + Sync + 'static,
@@ -58,19 +58,19 @@ where
             FmtLayer<Layered<RedirectLayer<V, S>, Registry>, N, E, ChannelWriter>,
         )
             -> FmtLayer<Layered<RedirectLayer<V, S>, Registry>, N1, E1, ChannelWriter>,
-    ) -> TerminalLog<N1, E1, V, S> {
-        TerminalLog {
+    ) -> LogTerminal<N1, E1, V, S> {
+        LogTerminal {
             rl: self.rl,
             fmt_layer: closure(self.fmt_layer),
         }
     }
 
-    pub fn with_max_level(mut self, level: tracing::Level) -> TerminalLog<N, E, V, S> {
+    pub fn with_max_level(mut self, level: tracing::Level) -> LogTerminal<N, E, V, S> {
         self.rl.max_level = level;
         self
     }
 
-    pub fn with_max_lines(self, lines: usize) -> TerminalLog<N, E, V, S> {
+    pub fn with_max_lines(self, lines: usize) -> LogTerminal<N, E, V, S> {
         *MAX_LINES.lock().unwrap() = lines;
         self
     }

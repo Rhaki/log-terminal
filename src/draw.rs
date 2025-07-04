@@ -1,41 +1,45 @@
 use {
+    crate::index::{ContentIndex, PositionIdex, TabIndex, TypedVec},
     ansi_to_tui::IntoText,
     ratatui::{
         Frame,
-        layout::{Constraint, Direction, Layout, Rect},
+        layout::{Constraint, Direction as LayoutDirection, Layout, Rect},
         style::{Style, Stylize},
+        symbols,
         text::{Line, Text},
         widgets::{
-            Block, Borders, List, ListState, Scrollbar, ScrollbarOrientation, ScrollbarState,
+            Block, Borders, List, ListState, Scrollbar, ScrollbarOrientation, ScrollbarState, Tabs,
         },
     },
     std::{
         cmp::min,
-        collections::VecDeque,
+        collections::{BTreeMap, VecDeque},
         sync::{Arc, LazyLock, Mutex, mpsc},
     },
 };
 pub(crate) static MAX_LINES: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(2_000));
 
-pub(crate) enum ChangeTabDirection {
+pub(crate) enum Direction {
     Left,
     Right,
 }
 
 pub(crate) enum DrawEvent {
     Scroll(i32),
-    ChangeTab(ChangeTabDirection),
+    ChangeSelect(Direction),
+    MoveSelect(Direction),
+    ChangeTab(Direction),
     Trace(Vec<u8>),
     Resize,
 }
 
-struct TabContent {
+struct Content {
     name: String,
     lines: VecDeque<Text<'static>>,
     offset: Offset,
 }
 
-impl TabContent {
+impl Content {
     fn scroll(&mut self, scroll: i32) {
         if scroll > 0 {
             self.offset.scroll_up(scroll, self.lines.len());
@@ -49,28 +53,42 @@ impl TabContent {
     }
 }
 
+#[derive(Default, PartialEq)]
+struct TabPosition {
+    tab_index: TabIndex,
+    position_index: PositionIdex,
+}
+
 pub struct State {
-    selected_tab: usize,
-    tabs: Vec<TabContent>,
+    selected_tab: TabPosition,
+    open_tabs: BTreeMap<TabIndex, PositionIdex>,
+    tabs_position: TypedVec<TabIndex, TypedVec<PositionIdex, ContentIndex>>,
+    contents: TypedVec<ContentIndex, Content>,
     trace_names: Arc<Mutex<VecDeque<Option<String>>>>,
+    init: bool,
 }
 
 impl State {
     pub fn new(trace_names: Arc<Mutex<VecDeque<Option<String>>>>) -> Self {
         Self {
-            selected_tab: 0,
-            tabs: Vec::new(),
+            selected_tab: TabPosition::default(),
+            open_tabs: BTreeMap::new(),
+            tabs_position: TypedVec::new(),
+            contents: TypedVec::new(),
             trace_names,
+            init: false,
         }
     }
 
     pub fn add_line(&mut self, line: Text<'static>, name: String) {
-        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.name == name) else {
-            self.tabs.push(TabContent {
-                name,
-                lines: VecDeque::from([line]),
-                offset: Offset::new(),
-            });
+        let Some(tab) = self.contents.iter_mut().find(|tab| tab.name == name) else {
+            let add_selected = !self.init;
+
+            if !self.init {
+                self.init = true;
+            }
+
+            self.add_content(name, line, add_selected);
 
             return;
         };
@@ -82,12 +100,299 @@ impl State {
         }
     }
 
-    fn get_selected_tab(&mut self) -> &mut TabContent {
-        &mut self.tabs[self.selected_tab]
+    fn get_selected_tab(&mut self) -> &mut Content {
+        let index = self
+            .tabs_position
+            .get(self.selected_tab.tab_index)
+            .unwrap()
+            .get(self.selected_tab.position_index)
+            .unwrap();
+
+        self.contents.get_mut(*index).unwrap()
     }
 
-    pub fn tab_count(&self) -> usize {
-        self.tabs.len()
+    pub fn tab_count(&self) -> TabIndex {
+        self.tabs_position.len()
+    }
+
+    fn add_content(&mut self, name: String, line: Text<'static>, add_selected: bool) {
+        self.contents.push(Content {
+            name,
+            lines: VecDeque::from([line]),
+            offset: Offset::new(),
+        });
+
+        let content_index = self.contents.len().manipulate(|index| index - 1);
+
+        self.add_tab(TabIndex(0), content_index, add_selected);
+    }
+
+    /// return true if the tab was removed
+    fn remove_tab(
+        &mut self,
+        tab_index: TabIndex,
+        position_index: PositionIdex,
+        open_previous: bool,
+    ) -> bool {
+        if let Some(tabs) = self.tabs_position.get_mut(tab_index) {
+            if tabs.len() > position_index {
+                tabs.remove(position_index);
+            }
+
+            if tabs.is_empty() {
+                self.tabs_position.remove(tab_index);
+
+                // remove the tab from the open_tabs
+                self.open_tabs.remove(&tab_index);
+
+                let mut new_open_tabs = BTreeMap::new();
+
+                for (k, v) in self.open_tabs.iter() {
+                    if k > &tab_index {
+                        new_open_tabs.insert(k.manipulate(|i| i.saturating_sub(1)), *v);
+                    } else {
+                        new_open_tabs.insert(*k, *v);
+                    }
+                }
+
+                self.open_tabs = new_open_tabs;
+
+                return true;
+            } else if open_previous {
+                let previous_position_index = position_index.manipulate(|i| i.saturating_sub(1));
+                self.open_tabs.insert(tab_index, previous_position_index);
+
+                return false;
+            }
+        }
+
+        false
+    }
+
+    fn add_tab(&mut self, tab_index: TabIndex, content_index: ContentIndex, add_selected: bool) {
+        let position_index = if let Some(tabs) = self.tabs_position.get_mut(tab_index) {
+            tabs.push(content_index);
+
+            tabs.len().manipulate(|i| i - 1)
+        } else {
+            if self.tabs_position.len() != tab_index {
+                panic!("tab index is not valid");
+            }
+
+            self.tabs_position.push(TypedVec::from(vec![content_index]));
+
+            PositionIdex(0)
+        };
+
+        if add_selected {
+            self.select_tab(tab_index, position_index, false);
+        }
+    }
+
+    fn select_tab(
+        &mut self,
+        tab_index: TabIndex,
+        position_index: PositionIdex,
+        close_previous: bool,
+    ) {
+        if close_previous {
+            self.open_tabs.remove(&self.selected_tab.tab_index);
+        }
+
+        self.selected_tab = TabPosition {
+            tab_index,
+            position_index,
+        };
+
+        self.open_tabs.insert(tab_index, position_index);
+    }
+
+    fn get_current_content_index(&self) -> &ContentIndex {
+        self.tabs_position
+            .get(self.selected_tab.tab_index)
+            .unwrap()
+            .get(self.selected_tab.position_index)
+            .unwrap()
+    }
+
+    fn rightest_tab(&self) -> TabPosition {
+        let max_tab_index = self.tabs_position.len().manipulate(|index| index - 1);
+
+        let max_position_index = self
+            .tabs_position
+            .get(max_tab_index)
+            .unwrap()
+            .len()
+            .manipulate(|index| index - 1);
+
+        TabPosition {
+            tab_index: max_tab_index,
+            position_index: max_position_index,
+        }
+    }
+
+    fn change_select(&mut self, direction: Direction) -> Action {
+        match direction {
+            Direction::Left => {
+                if self.selected_tab.tab_index == TabIndex(0)
+                    && self.selected_tab.position_index == PositionIdex(0)
+                {
+                    return Action::Continue;
+                }
+
+                let (new_tab_index, new_position_index) = if self.selected_tab.position_index
+                    == PositionIdex(0)
+                {
+                    let new_tab_index = self.selected_tab.tab_index.manipulate(|index| index - 1);
+
+                    // Get last position index of tab_index -1
+
+                    let last_position_index = self
+                        .tabs_position
+                        .get(new_tab_index)
+                        .unwrap()
+                        .len()
+                        .manipulate(|index| index - 1);
+
+                    (new_tab_index, last_position_index)
+                } else {
+                    (
+                        self.selected_tab.tab_index,
+                        self.selected_tab
+                            .position_index
+                            .manipulate(|index| index - 1),
+                    )
+                };
+
+                // if the new tab index is different compared to the current tab index, we don't have to close the previous tab
+                self.select_tab(
+                    new_tab_index,
+                    new_position_index,
+                    new_tab_index == self.selected_tab.tab_index,
+                );
+
+                Action::Draw
+            },
+            Direction::Right => {
+                let rightest_tab = self.rightest_tab();
+
+                if rightest_tab == self.selected_tab {
+                    return Action::Continue;
+                }
+
+                // check if in the current tab the selected position is the last one
+                let current_tab = self.tabs_position.get(self.selected_tab.tab_index).unwrap();
+
+                let (next_tab_index, next_position_index) = if current_tab
+                    .len()
+                    .manipulate(|index| index - 1)
+                    == self.selected_tab.position_index
+                {
+                    let new_tab_index = self.selected_tab.tab_index.manipulate(|index| index + 1);
+
+                    (new_tab_index, PositionIdex(0))
+                } else {
+                    (
+                        self.selected_tab.tab_index,
+                        self.selected_tab
+                            .position_index
+                            .manipulate(|index| index + 1),
+                    )
+                };
+
+                // if the new tab index is different compared to the current tab index, we don't have to close the previous tab
+
+                self.select_tab(
+                    next_tab_index,
+                    next_position_index,
+                    next_tab_index == self.selected_tab.tab_index,
+                );
+
+                Action::Draw
+            },
+        }
+    }
+
+    fn move_select(&mut self, direction: Direction) -> Action {
+        let current_tab_index = self.selected_tab.tab_index;
+
+        match direction {
+            Direction::Left => {
+                if current_tab_index == TabIndex(0) {
+                    return Action::Continue;
+                }
+
+                let next_tab = current_tab_index.manipulate(|index| index - 1);
+
+                let current_content_index = *self.get_current_content_index();
+
+                self.remove_tab(current_tab_index, self.selected_tab.position_index, true);
+
+                self.add_tab(next_tab, current_content_index, true);
+            },
+            Direction::Right => {
+                // If the current tab has only 1 element and it's the last tab, don't do anything
+                let is_last_tab =
+                    self.tabs_position.len() == current_tab_index.manipulate(|i| i + 1);
+
+                if is_last_tab && *self.tabs_position.get(current_tab_index).unwrap().len() == 1 {
+                    return Action::Continue;
+                }
+
+                let mut next_tab = current_tab_index.manipulate(|index| index + 1);
+
+                let current_content_index = *self.get_current_content_index();
+
+                let removed =
+                    self.remove_tab(current_tab_index, self.selected_tab.position_index, true);
+
+                if removed {
+                    next_tab = next_tab.manipulate(|index| index - 1);
+                }
+
+                self.add_tab(next_tab, current_content_index, true);
+            },
+        }
+
+        Action::Draw
+    }
+
+    fn change_tab(&mut self, direction: Direction) -> Action {
+        let current_tab_index = self.selected_tab.tab_index;
+
+        match direction {
+            Direction::Left => {
+                if current_tab_index == TabIndex(0) {
+                    return Action::Continue;
+                }
+
+                let next_tab = current_tab_index.manipulate(|index| index - 1);
+
+                self.selected_tab = TabPosition {
+                    tab_index: next_tab,
+                    position_index: *self.open_tabs.get(&next_tab).unwrap(),
+                };
+
+                Action::Draw
+            },
+            Direction::Right => {
+                let is_last_tab =
+                    self.tabs_position.len() == current_tab_index.manipulate(|i| i + 1);
+
+                if is_last_tab {
+                    return Action::Continue;
+                }
+
+                let next_tab = current_tab_index.manipulate(|index| index + 1);
+
+                self.selected_tab = TabPosition {
+                    tab_index: next_tab,
+                    position_index: *self.open_tabs.get(&next_tab).unwrap(),
+                };
+
+                Action::Draw
+            },
+        }
     }
 }
 
@@ -160,12 +465,12 @@ pub(crate) fn draw_thread(
             terminal
                 .draw(|frame| {
                     let main_chunk = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints(vec![Constraint::Ratio(1, tabs as u32); tabs])
+                        .direction(LayoutDirection::Horizontal)
+                        .constraints(vec![Constraint::Ratio(1, *tabs as u32); *tabs])
                         .split(frame.area());
 
-                    for (index, tab) in state.tabs.iter().enumerate() {
-                        render_tab(tab, index == state.selected_tab, main_chunk[index], frame);
+                    for (index, content) in state.tabs_position.iter().enumerate() {
+                        render_tab(TabIndex(index), content, main_chunk[index], &state, frame);
                     }
                 })
                 .unwrap();
@@ -173,15 +478,75 @@ pub(crate) fn draw_thread(
     }
 }
 
-fn render_tab(tab: &TabContent, selected: bool, area: Rect, frame: &mut Frame) {
+fn render_tab(
+    index: TabIndex,
+    content: &TypedVec<PositionIdex, ContentIndex>,
+    area: Rect,
+    state: &State,
+    frame: &mut Frame,
+) {
+    let mut header = vec![];
+
+    let mut selected = None;
+
+    let mut to_render = None;
+
+    let render_index = state.open_tabs.get(&index).unwrap();
+
+    for (position_index, content_index) in content.iter().enumerate() {
+        let position_index = PositionIdex(position_index);
+        let c = state.contents.get(*content_index).unwrap();
+        header.push(c.name.clone());
+
+        if position_index == *render_index {
+            to_render = Some(content_index);
+        }
+
+        if state.selected_tab
+            == (TabPosition {
+                tab_index: index,
+                position_index,
+            })
+        {
+            selected = Some(position_index);
+        }
+    }
+
+    let content = state.contents.get(*to_render.unwrap()).unwrap();
+
+    let chunk = Layout::default()
+        .direction(LayoutDirection::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+
+    let mut tabs = Tabs::new(header).highlight_style(Style::default());
+
+    if let Some(selected) = selected {
+        tabs = tabs
+            .select(*selected)
+            .highlight_style(Style::default().yellow().bold());
+    }
+
+    frame.render_widget(tabs, chunk[0]);
+
+    render_content(content, selected.is_some(), chunk[1], frame);
+}
+
+fn render_content(tab: &Content, selected: bool, area: Rect, frame: &mut Frame) {
     let offset = tab.offset();
     let trace_len = tab.lines.len();
 
     // Render the list
     {
         let mut block = Block::default()
-            .title(Line::from(tab.name.to_string()).gray().bold().centered())
-            .borders(Borders::ALL);
+            .title(
+                Line::from(format!(" {} ", tab.name))
+                    .gray()
+                    .bold()
+                    .centered(),
+            )
+            .borders(Borders::ALL)
+            .border_set(symbols::border::ROUNDED);
 
         if offset != trace_len {
             block = block.title_bottom(
@@ -225,22 +590,9 @@ fn handle_draw_event(state: &mut State, event: DrawEvent) -> Action {
         },
         DrawEvent::Trace(trace) => on_trace_event(trace, state),
         DrawEvent::Resize => Action::Draw,
-        DrawEvent::ChangeTab(direction) => {
-            match direction {
-                ChangeTabDirection::Left => {
-                    state.selected_tab = state.selected_tab.saturating_sub(1);
-                },
-                ChangeTabDirection::Right => {
-                    if state.selected_tab < state.tabs.len() - 1 {
-                        state.selected_tab += 1;
-                    } else {
-                        return Action::Continue;
-                    }
-                },
-            }
-
-            Action::Draw
-        },
+        DrawEvent::ChangeSelect(direction) => state.change_select(direction),
+        DrawEvent::MoveSelect(change_tab_direction) => state.move_select(change_tab_direction),
+        DrawEvent::ChangeTab(change_tab_direction) => state.change_tab(change_tab_direction),
     }
 }
 
@@ -267,8 +619,6 @@ fn on_trace_event(trace: Vec<u8>, state: &mut State) -> Action {
     };
 
     state.add_line(trace, name);
-
-    // get_or_insert(&mut state.data, trace, name);
 
     Action::Draw
 }
