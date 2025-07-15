@@ -1,6 +1,7 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use ratatui::widgets::{List, ListState};
-use tracing::info;
+use {
+    crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers},
+    ratatui::widgets::{List, ListState},
+};
 
 #[test]
 fn inputs() {

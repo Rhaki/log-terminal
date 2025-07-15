@@ -5,7 +5,7 @@ use {
         Frame,
         layout::{Constraint, Direction as LayoutDirection, Layout, Rect},
         style::{Style, Stylize},
-        symbols,
+        symbols::{self},
         text::{Line, Text},
         widgets::{
             Block, Borders, List, ListState, Scrollbar, ScrollbarOrientation, ScrollbarState, Tabs,
@@ -14,9 +14,10 @@ use {
     std::{
         cmp::min,
         collections::{BTreeMap, VecDeque},
-        sync::{Arc, LazyLock, Mutex, mpsc},
+        sync::{Arc, LazyLock, Mutex, RwLock, mpsc},
     },
 };
+
 pub(crate) static MAX_LINES: LazyLock<Mutex<usize>> = LazyLock::new(|| Mutex::new(2_000));
 
 pub(crate) enum Direction {
@@ -33,23 +34,37 @@ pub(crate) enum DrawEvent {
     Resize,
 }
 
+struct Row {
+    log: String,
+    lines: Option<Vec<Text<'static>>>,
+}
+
+impl Row {
+    fn new(log: String) -> Self {
+        Self { log, lines: None }
+    }
+}
+
 struct Content {
     name: String,
-    lines: VecDeque<Text<'static>>,
+    lines: RwLock<VecDeque<Row>>,
     offset: Offset,
+    last_width: RwLock<u16>,
 }
 
 impl Content {
     fn scroll(&mut self, scroll: i32) {
         if scroll > 0 {
-            self.offset.scroll_up(scroll, self.lines.len());
+            self.offset
+                .scroll_up(scroll, self.lines.read().unwrap().len());
         } else {
-            self.offset.scroll_down(scroll, self.lines.len());
+            self.offset
+                .scroll_down(scroll, self.lines.read().unwrap().len());
         }
     }
 
     fn offset(&self) -> usize {
-        self.offset.offset(self.lines.len())
+        self.offset.offset(self.lines.read().unwrap().len())
     }
 }
 
@@ -80,7 +95,7 @@ impl State {
         }
     }
 
-    pub fn add_line(&mut self, line: Text<'static>, name: String) {
+    pub fn add_line(&mut self, line: String, name: String) {
         let Some(tab) = self.contents.iter_mut().find(|tab| tab.name == name) else {
             let add_selected = !self.init;
 
@@ -93,10 +108,10 @@ impl State {
             return;
         };
 
-        tab.lines.push_back(line);
+        tab.lines.write().unwrap().push_back(Row::new(line));
 
-        if tab.lines.len() > *MAX_LINES.lock().unwrap() {
-            tab.lines.pop_front();
+        if tab.lines.read().unwrap().len() > *MAX_LINES.lock().unwrap() {
+            tab.lines.write().unwrap().pop_front();
         }
     }
 
@@ -115,11 +130,12 @@ impl State {
         self.tabs_position.len()
     }
 
-    fn add_content(&mut self, name: String, line: Text<'static>, add_selected: bool) {
+    fn add_content(&mut self, name: String, line: String, add_selected: bool) {
         self.contents.push(Content {
             name,
-            lines: VecDeque::from([line]),
+            lines: RwLock::new(VecDeque::from([Row::new(line)])),
             offset: Offset::new(),
+            last_width: RwLock::new(0),
         });
 
         let content_index = self.contents.len().manipulate(|index| index - 1);
@@ -534,7 +550,37 @@ fn render_tab(
 
 fn render_content(tab: &Content, selected: bool, area: Rect, frame: &mut Frame) {
     let offset = tab.offset();
-    let trace_len = tab.lines.len();
+
+    let last_width = *tab.last_width.read().unwrap();
+
+    let mut lines = tab.lines.write().unwrap();
+
+    let trace_len = lines.len();
+
+    let messages = lines.iter_mut().flat_map(|text| {
+        if let (Some(lines), true) = (&text.lines, last_width == area.width) {
+            return lines.clone();
+        }
+
+        let lines = textwrap::wrap(&text.log, area.width.saturating_sub(3) as usize)
+            .into_iter()
+            .filter_map(|text| {
+                if text.is_empty() {
+                    return None;
+                } else {
+                    text.as_ref().into_text().ok()
+                }
+            })
+            .collect::<Vec<_>>();
+
+        text.lines = Some(lines.clone());
+
+        lines
+    });
+
+    if last_width != area.width {
+        *tab.last_width.write().unwrap() = area.width;
+    }
 
     // Render the list
     {
@@ -560,7 +606,7 @@ fn render_content(tab: &Content, selected: bool, area: Rect, frame: &mut Frame) 
             block = block.border_style(Style::default().yellow());
         }
 
-        let list = List::new(tab.lines.clone()).block(block);
+        let list = List::new(messages).block(block);
 
         let mut state = ListState::default().with_selected(Some(offset));
 
@@ -609,11 +655,7 @@ fn on_trace_event(trace: Vec<u8>, state: &mut State) -> Action {
     };
 
     let trace = if let Ok(trace) = String::from_utf8(trace) {
-        if let Ok(trace) = trace.into_text() {
-            trace
-        } else {
-            return Action::Continue;
-        }
+        trace
     } else {
         return Action::Continue;
     };
