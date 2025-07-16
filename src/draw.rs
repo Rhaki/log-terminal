@@ -34,26 +34,44 @@ pub(crate) enum DrawEvent {
     Resize,
 }
 
+#[derive(Clone)]
+
 struct Row {
     log: String,
-    lines: Option<Vec<Text<'static>>>,
+    text: Option<Text<'static>>,
+    last_width: u16,
 }
 
 impl Row {
     fn new(log: String) -> Self {
-        Self { log, lines: None }
+        Self {
+            log,
+            text: None,
+            last_width: 0,
+        }
     }
 }
 
 struct Content {
     name: String,
     lines: RwLock<VecDeque<Row>>,
+    buffer_lines: Vec<Row>,
     offset: Offset,
-    last_width: RwLock<u16>,
 }
 
 impl Content {
+    pub fn new(name: String, line: String) -> Self {
+        Self {
+            name,
+            lines: RwLock::new(VecDeque::from([Row::new(line)])),
+            buffer_lines: vec![],
+            offset: Offset::new(),
+        }
+    }
+
     fn scroll(&mut self, scroll: i32) {
+        let was_enabled = self.offset.enabled;
+
         if scroll > 0 {
             self.offset
                 .scroll_up(scroll, self.lines.read().unwrap().len());
@@ -61,10 +79,34 @@ impl Content {
             self.offset
                 .scroll_down(scroll, self.lines.read().unwrap().len());
         }
+        if was_enabled == true && self.offset.enabled == false {
+            let mut lines = self.lines.write().unwrap();
+
+            lines.extend(self.buffer_lines.drain(..));
+
+            let to_remove = lines.len().saturating_sub(*MAX_LINES.lock().unwrap());
+
+            if to_remove > 0 {
+                lines.drain(..to_remove);
+            }
+        }
     }
 
     fn offset(&self) -> usize {
         self.offset.offset(self.lines.read().unwrap().len())
+    }
+
+    fn add_log(&mut self, log: String) {
+        if self.offset.enabled {
+            self.buffer_lines.push(Row::new(log));
+        } else {
+            let mut lines = self.lines.write().unwrap();
+            lines.push_back(Row::new(log));
+
+            if lines.len() > *MAX_LINES.lock().unwrap() {
+                lines.pop_front();
+            }
+        }
     }
 }
 
@@ -108,11 +150,7 @@ impl State {
             return;
         };
 
-        tab.lines.write().unwrap().push_back(Row::new(line));
-
-        if tab.lines.read().unwrap().len() > *MAX_LINES.lock().unwrap() {
-            tab.lines.write().unwrap().pop_front();
-        }
+        tab.add_log(line);
     }
 
     fn get_selected_tab(&mut self) -> &mut Content {
@@ -131,12 +169,7 @@ impl State {
     }
 
     fn add_content(&mut self, name: String, line: String, add_selected: bool) {
-        self.contents.push(Content {
-            name,
-            lines: RwLock::new(VecDeque::from([Row::new(line)])),
-            offset: Offset::new(),
-            last_width: RwLock::new(0),
-        });
+        self.contents.push(Content::new(name, line));
 
         let content_index = self.contents.len().manipulate(|index| index - 1);
 
@@ -247,7 +280,36 @@ impl State {
         }
     }
 
-    fn change_select(&mut self, direction: Direction) -> Action {
+    fn on_scroll(&mut self, scroll: i32) -> Action {
+        let tab = self.get_selected_tab();
+        tab.scroll(scroll);
+        Action::Draw
+    }
+
+    fn on_trace_event(&mut self, trace: Vec<u8>) -> Action {
+        let name = self
+            .trace_names
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("trace received but no label detected");
+
+        let Some(name) = name else {
+            return Action::Continue;
+        };
+
+        let trace = if let Ok(trace) = String::from_utf8(trace) {
+            trace
+        } else {
+            return Action::Continue;
+        };
+
+        self.add_line(trace, name);
+
+        Action::Draw
+    }
+
+    fn on_change_select(&mut self, direction: Direction) -> Action {
         match direction {
             Direction::Left => {
                 if self.selected_tab.tab_index == TabIndex(0)
@@ -329,7 +391,7 @@ impl State {
         }
     }
 
-    fn move_select(&mut self, direction: Direction) -> Action {
+    fn on_move_select(&mut self, direction: Direction) -> Action {
         let current_tab_index = self.selected_tab.tab_index;
 
         match direction {
@@ -373,7 +435,7 @@ impl State {
         Action::Draw
     }
 
-    fn change_tab(&mut self, direction: Direction) -> Action {
+    fn on_change_tab(&mut self, direction: Direction) -> Action {
         let current_tab_index = self.selected_tab.tab_index;
 
         match direction {
@@ -549,38 +611,54 @@ fn render_tab(
 }
 
 fn render_content(tab: &Content, selected: bool, area: Rect, frame: &mut Frame) {
-    let offset = tab.offset();
-
-    let last_width = *tab.last_width.read().unwrap();
+    let raw_offset = tab.offset();
 
     let mut lines = tab.lines.write().unwrap();
 
-    let trace_len = lines.len();
+    let mut trace_len = 0;
 
-    let messages = lines.iter_mut().flat_map(|text| {
-        if let (Some(lines), true) = (&text.lines, last_width == area.width) {
-            return lines.clone();
-        }
+    let mut offset = 0;
 
-        let lines = textwrap::wrap(&text.log, area.width.saturating_sub(3) as usize)
-            .into_iter()
-            .filter_map(|text| {
-                if text.is_empty() {
-                    return None;
-                } else {
-                    text.as_ref().into_text().ok()
+    let messages = lines
+        .iter_mut()
+        .enumerate()
+        .flat_map(|(i, log)| {
+            if let (Some(text), true) = (&log.text, log.last_width == area.width) {
+                if i < raw_offset {
+                    offset += text.lines.len();
                 }
-            })
-            .collect::<Vec<_>>();
 
-        text.lines = Some(lines.clone());
+                trace_len += text.lines.len();
 
-        lines
-    });
+                return text.clone();
+            }
 
-    if last_width != area.width {
-        *tab.last_width.write().unwrap() = area.width;
-    }
+            let lines = textwrap::wrap(&log.log, area.width.saturating_sub(3) as usize)
+                .into_iter()
+                .filter_map(|text| {
+                    if text.is_empty() {
+                        return None;
+                    } else {
+                        text.as_ref().into_text().ok().map(|text| text.lines)
+                    }
+                })
+                .flatten()
+                .collect::<Vec<_>>();
+
+            if i < raw_offset {
+                offset += lines.len();
+            }
+
+            trace_len += lines.len();
+
+            let parsed_text = Text::from(lines);
+
+            log.text = Some(parsed_text.clone());
+            log.last_width = area.width;
+
+            parsed_text
+        })
+        .collect::<Vec<_>>();
 
     // Render the list
     {
@@ -629,38 +707,11 @@ fn render_content(tab: &Content, selected: bool, area: Rect, frame: &mut Frame) 
 
 fn handle_draw_event(state: &mut State, event: DrawEvent) -> Action {
     match event {
-        DrawEvent::Scroll(scroll_event) => {
-            let tab = state.get_selected_tab();
-            tab.scroll(scroll_event);
-            Action::Draw
-        },
-        DrawEvent::Trace(trace) => on_trace_event(trace, state),
+        DrawEvent::Scroll(scroll) => state.on_scroll(scroll),
+        DrawEvent::Trace(trace) => state.on_trace_event(trace),
         DrawEvent::Resize => Action::Draw,
-        DrawEvent::ChangeSelect(direction) => state.change_select(direction),
-        DrawEvent::MoveSelect(change_tab_direction) => state.move_select(change_tab_direction),
-        DrawEvent::ChangeTab(change_tab_direction) => state.change_tab(change_tab_direction),
+        DrawEvent::ChangeSelect(select_direction) => state.on_change_select(select_direction),
+        DrawEvent::MoveSelect(move_direction) => state.on_move_select(move_direction),
+        DrawEvent::ChangeTab(tab_direction) => state.on_change_tab(tab_direction),
     }
-}
-
-fn on_trace_event(trace: Vec<u8>, state: &mut State) -> Action {
-    let name = state
-        .trace_names
-        .lock()
-        .unwrap()
-        .pop_front()
-        .expect("trace received but no label detected");
-
-    let Some(name) = name else {
-        return Action::Continue;
-    };
-
-    let trace = if let Ok(trace) = String::from_utf8(trace) {
-        trace
-    } else {
-        return Action::Continue;
-    };
-
-    state.add_line(trace, name);
-
-    Action::Draw
 }

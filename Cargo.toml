@@ -4,7 +4,7 @@ description = "Terminal manager for displaying outputs/errors of processes launc
 edition     = "2024"
 license     = "MIT"
 name        = "log-terminal"
-version     = "0.1.2"
+version     = "0.1.3"
 
 [dependencies]
 ansi-to-tui        = "7"

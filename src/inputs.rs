@@ -29,11 +29,11 @@ keys! {
     // Left
     SELECT_LEFT:     KeyCode::Left,
     MOVE_LEFT:       KeyCode::Left      => KeyModifiers::SHIFT,
-    CHANGE_LEFT:     KeyCode::Char('b')      => KeyModifiers::ALT,
+    CHANGE_LEFT:     KeyCode::Char('b') => KeyModifiers::ALT,
     // Right
     SELECT_RIGHT:    KeyCode::Right,
     MOVE_RIGHT:      KeyCode::Right     => KeyModifiers::SHIFT,
-    CHANGE_RIGHT:    KeyCode::Char('f')     => KeyModifiers::ALT,
+    CHANGE_RIGHT:    KeyCode::Char('f') => KeyModifiers::ALT,
     // Scroll up
     SCROLL_UP:       KeyCode::Up,
     SCROLL_10_UP:    KeyCode::Up        => KeyModifiers::SHIFT,
@@ -60,7 +60,7 @@ pub fn inputs_thread(tx: mpsc::Sender<DrawEvent>) {
                     tx.send(DrawEvent::ChangeSelect(Direction::Left)).unwrap();
                 } else if key_event == MOVE_LEFT {
                     tx.send(DrawEvent::MoveSelect(Direction::Left)).unwrap();
-                } else if key_event == CHANGE_LEFT {
+                }  else if key_event == CHANGE_LEFT {
                     tx.send(DrawEvent::ChangeTab(Direction::Left)).unwrap();
                 }
                 // Right

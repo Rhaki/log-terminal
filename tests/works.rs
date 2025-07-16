@@ -1,8 +1,8 @@
 use log_terminal::{LogTerminal, SplitBy, SplitFilter};
 
 #[test]
-fn name() {
-    LogTerminal::new(SplitBy::Name(SplitFilter::none()))
+fn span_prefix() {
+    LogTerminal::new(SplitBy::SpanPrefix(SplitFilter::none()))
         .with_max_level(tracing::Level::INFO)
         .finish();
 
@@ -23,17 +23,17 @@ fn name() {
 
 #[test]
 fn max_lines() {
-    LogTerminal::new(SplitBy::Name(SplitFilter::none()))
-        .with_max_lines(100)
+    LogTerminal::new(SplitBy::SpanPrefix(SplitFilter::none()))
+        .with_max_lines(30)
         .finish();
 
     let parent = tracing::span!(tracing::Level::INFO, "parent");
 
     let mut i = 0;
     loop {
-        tracing::info!(parent: &parent, amount = i, "hello");
+        tracing::info!(parent: &parent, amount = i, "helloooooooooooooooooooooo");
         i += 1;
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 

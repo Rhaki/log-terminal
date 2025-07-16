@@ -88,15 +88,21 @@ where
 }
 
 pub enum SplitBy<V, S> {
+    /// Tabs are splitted by the `target`
     Target(SplitFilter<V, S>),
+    /// Tabs are splitted by the `target` prefix
     TargetPrefix(SplitFilter<V, S>),
-    Name(SplitFilter<V, S>),
+    /// Tabs are splitted by the `span` prefix
+    SpanPrefix(SplitFilter<V, S>),
 }
 
 #[non_exhaustive]
 pub enum SplitFilter<V, S> {
+    /// Based on [`SplitBy`], show only the tabs that are in the whitelist
     WhiteList(V, PhantomData<S>),
+    /// Based on [`SplitBy`], show only the tabs that are not in the blacklist
     BlackList(V, PhantomData<S>),
+    /// Show all the tabs
     None,
 }
 
@@ -105,16 +111,19 @@ where
     S: PartialEq<String>,
     V: AsRef<[S]>,
 {
+    /// Based on [`SplitBy`], show only the tabs that are in the whitelist
     pub fn whitelist(items: V) -> Self {
         Self::WhiteList(items, PhantomData)
     }
 
+    /// Based on [`SplitBy`], show only the tabs that are not in the blacklist
     pub fn blacklist(items: V) -> Self {
         Self::BlackList(items, PhantomData)
     }
 }
 
 impl SplitFilter<Vec<String>, String> {
+    /// Show all the tabs
     pub fn none() -> Self {
         Self::None
     }
@@ -198,7 +207,7 @@ where
                     .to_string();
                 filter.filter(target)
             },
-            SplitBy::Name(filter) => {
+            SplitBy::SpanPrefix(filter) => {
                 let str = if let Some(scope) = _ctx.event_scope(event) {
                     if let Some(span) = scope.from_root().next() {
                         span.name().to_string()
